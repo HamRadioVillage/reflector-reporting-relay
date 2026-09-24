@@ -32,9 +32,14 @@ Five message types, all with a `type` discriminator:
 |---|---|---|
 | `client_connect` | `CClients::AddClient()` — Clients.cpp:71 | `callsign`, `ip`, `protocol`, `module` |
 | `client_disconnect` | `CClients::RemoveClient()` — Clients.cpp:100 | `callsign`, `ip`, `protocol`, `module` |
-| `hearing` | `CUsers::Hearing()` — Users.cpp:77 | `my`, `ur`, `rpt1`, `rpt2`, `module`, `protocol` |
-| `closing` | `CUsers::Closing()` — Users.cpp:90 | `my`, `module`, `protocol`, `recording` (optional) |
+| `hearing` | `CUsers::Hearing()` — Users.cpp:77 | `callsign`, `repeater`, `rpt2`, `via_peer`, `module`, `protocol` |
+| `closing` | `CUsers::Closing()` — Users.cpp:90 | `callsign`, `module`, `protocol`, `recording` (optional) |
 | `state` | `MaintenanceThread()` — Reflector.cpp:405, every `Interval` s | full `JsonReport()`: `Configure`, `Peers`, `Clients`, `Users`, `ActiveTalkers` |
+
+Every message also carries `type`, `timestamp` and `reflector` — the publishing
+reflector's own callsign, named `reflector` because `callsign` already means the
+station an event is *about*. All of this is confirmed on the wire against a
+reflector carrying the fixes; see §4.4.
 
 Sends use `nng_send(..., NNG_FLAG_NONBLOCK)` — fire-and-forget, dropped under
 backpressure. `ActiveTalkers` (Reflector.cpp:528) is new and genuinely useful:
@@ -80,7 +85,7 @@ developed, restarted and rolled back without touching a running reflector.
 #### 4.1 Shape
 
 A single static binary, `relay`. It dials one or more urfd publishers as an NNG
-**SUB**, normalizes what arrives, and writes Redis. It is a client of both ends
+**SUB**, validates and trims what arrives, and writes Redis. It is a client of both ends
 and a server to nothing.
 
 ```
@@ -111,7 +116,7 @@ Configurable prefix, default `urfd`. With callsign `URF123` the base is
 
 | Key | Type | Source |
 |---|---|---|
-| `urfd:URF123:reflector` | HASH | callsign, version, modules, transcoded modules, country, sponsor, url, `updatedat` |
+| `urfd:URF123:reflector` | HASH | callsign, modules, transcoded modules, country, sponsor, url, `updatedat` |
 | `urfd:URF123:config` | STRING (JSON) | the `Configure` block |
 | `urfd:URF123:peers` | STRING (JSON array) | `Peers` |
 | `urfd:URF123:clients` | STRING (JSON array) | `Clients` |
@@ -141,28 +146,45 @@ a dead reflector are indistinguishable to a dashboard.
 **Doorbell** — `PUBLISH urfd:URF123:updates <epoch-ms>` after each snapshot
 commit, for consumers that would rather be told than poll.
 
-#### 4.4 Normalization on ingest
+#### 4.4 Ingest: trim, attribute, validate
 
-The `hearing` event's JSON field names are shifted one position relative to what
-they hold (see Part B, item 3). The relay corrects this on the way in, so Redis
-consumers see accurate names whether or not the upstream fix ever lands:
+The relay targets the **corrected** event shape and carries no compatibility
+path for the stock publisher. Every event arrives with `type`, `timestamp` and
+`reflector`, and the `hearing` field names hold what they say, so nothing is
+remapped. An event without that envelope is refused with `event.ErrNoEnvelope`
+and logged once per source: repairing it would mean supplying identity from
+config and stamping receipt time, and both were dropped on purpose.
 
-| urfd JSON field | actually holds (C++) | relay writes |
+What remains is mechanical:
+
+| Wire field | Holds | Relay behaviour |
 |---|---|---|
-| `my` | `my` | `callsign` |
-| `ur` | `rpt1` | `repeater` |
-| `rpt1` | `rpt2` | `rpt2` |
-| `rpt2` | `xlx` | `via_peer` |
+| `callsign` | the transmitting user | trim padding |
+| `repeater` | `rpt1` — for M17, the linked client (M17Protocol.cpp:379) | trim padding |
+| `rpt2` | `rpt2` | trim, pass through |
+| `via_peer` | `xlx` — a peer callsign, or this reflector itself | trim; omit when it equals `reflector` |
+| `module` | the module letter | may be blank; see below |
+| `reflector` | the publishing reflector's callsign | trim; this is the attribution key, so no per-source config is needed |
+| `timestamp` | emission time, whole seconds | the event time; a stream id is the tiebreak |
 
-Two more gaps the relay papers over:
+**Callsigns are space-padded to eight characters** — `"N0CALL  "`, or nine with
+a module, `"URF999  M"`. Untrimmed, nothing downstream matches, so the relay
+trims every callsign it writes, including the strings inside the `Peers`,
+`Clients`, `Users` and `ActiveTalkers` arrays of a `state` snapshot.
 
-* **No event carries a timestamp.** The relay stamps receipt time. On loopback
-  that is within a millisecond of emission; it is not the reflector's own clock,
-  and the Part B fix would make it exact.
-* **No event carries the reflector callsign.** Only `state` does, via
-  `Configure.Callsign`. So the relay takes the callsign from its own per-source
-  config rather than waiting for the first `state` broadcast — otherwise every
-  event in the first `Interval` seconds after startup is unattributable.
+**A blank module is an unknown module.** `hearing`'s `module` comes from
+`xlx.GetCSModule()`, and four call sites — G3:573, DMRPlus:211, IMRS:156,
+USRP:227 — pass the bare reflector callsign, whose module stays `' '`. Those
+events carry `"module": " "`, which trims to empty rather than becoming a module
+named space. Everything else in the reflector gets this right: `state`'s
+`OnModule` and the XML `<On module>` both read `m_Rpt2`, and `closing` reads
+`GetStreamModule()` — so the fallback for a blank module is the next `state`
+snapshot. Fixed upstream in W0CHP/urfd#2; the guard stays for reflectors that
+predate it.
+
+**No version.** `JsonReport()` publishes no reflector version — it appears only
+in urfd's startup log — so the `:reflector` hash cannot carry one and does not
+invent it.
 
 #### 4.5 Configuration
 
@@ -217,12 +239,15 @@ list, and it is deliberately short.
 
 ### 5. Phasing
 
-1. **Tap.** Dial SUB, decode, pretty-print to stdout. Run it against a live
-   reflector and confirm the wire format matches this document — everything here
-   is read from source, not observed on the wire.
-2. **Snapshot writer.** `state` → the six snapshot keys, `MULTI`/`EXEC`, TTL.
-3. **Streams + normalization.** `hearing` / `closing` / connect / disconnect,
-   with the field remapping from §4.4.
+1. ~~**Tap.**~~ **Done.** A raw SP/TCP subscriber, 66 messages captured off a
+   live reflector. It retired the remapping layer, the config-supplied callsign
+   and the receipt-time stamp, and found the callsign padding.
+2. ~~**Snapshot writer.**~~ **Done.** `state` → the six snapshot keys,
+   `MULTI`/`EXEC`, TTL = 3 × the reflector's own `Interval`. Verified against a
+   live reflector and a real Redis: keys land, keys expire when the reflector
+   stops, and the relay reconnects on its own when it returns.
+3. **Streams + trim.** `hearing` / `closing` / connect / disconnect into the
+   `:lastheard` and `:events` streams, with the ingest rules from §4.4.
 4. **Heartbeat, doorbell, drop counters.**
 5. **Multi-source.**
 6. **Packaging.** systemd unit, a `.deb` or a release binary, README with the
@@ -240,14 +265,15 @@ value. All line numbers are from `cee46d1`.
 
 | # | Change | Why it matters |
 |---|---|---|
-| 1 | **Stop publishing under reflector mutexes.** `Publish()` is called from `CUsers::Hearing()` (Users.cpp:77), `CUsers::Closing()` (Users.cpp:90) and `CClients::AddClient`/`RemoveClient` (Clients.cpp:71, 100) — all with the users or clients mutex held, on protocol threads. `Publish()` does `event.dump()` (JSON serialization plus allocation) and takes its own mutex before the non-blocking send. `NONBLOCK` bounds it, so this is contention rather than deadlock, but it is per-transmission serialization on a hot path under a lock every protocol thread needs. Hand off to a bounded queue drained by the maintenance thread; `CSafePacketQueue` is the existing pattern. |
-| 2 | **Add `timestamp` and `callsign` to every event.** Two lines. It is the difference between a subscriber knowing when something happened and guessing from arrival time, and between attributing an event to a reflector and inferring it from which socket it came in on. |
-| 3 | **Fix the `hearing` field names.** Users.cpp:70–76 writes `event["ur"] = rpt1`, `event["rpt1"] = rpt2`, `event["rpt2"] = xlx` — each label holds the *next* field's value, and `xlx` is a peer reflector callsign, not RPT2. Any subscriber written against these names inherits the confusion. |
+| 1 | ~~**Stop publishing under reflector mutexes.**~~ **Sent: W0CHP/urfd#1 (`ed79fc9`).** `Publish()` is called from `CUsers::Hearing()` (Users.cpp:77), `CUsers::Closing()` (Users.cpp:90) and `CClients::AddClient`/`RemoveClient` (Clients.cpp:71, 100) — all with the users or clients mutex held, on protocol threads. `Publish()` does `event.dump()` (JSON serialization plus allocation) and takes its own mutex before the non-blocking send. `NONBLOCK` bounds it, so this is contention rather than deadlock, but it is per-transmission serialization on a hot path under a lock every protocol thread needs. Hand off to a bounded queue drained by the maintenance thread; `CSafePacketQueue` is the existing pattern. |
+| 2 | ~~**Add `timestamp` and `callsign` to every event.**~~ **Sent: W0CHP/urfd#1 (`683d305`).** Landed as `timestamp` plus `reflector` — not `callsign`, which already means the station an event is about. Follow-up: whole-second precision cannot order two events in the same second. |
+| 3 | ~~**Fix the `hearing` field names.**~~ **Sent: W0CHP/urfd#1 (`d0c9477`).** Users.cpp:70–76 wrote `event["ur"] = rpt1`, `event["rpt1"] = rpt2`, `event["rpt2"] = xlx` — each label holding the *next* field's value. Now `callsign`, `repeater`, `rpt2`, `via_peer`. Breaking change for any existing subscriber. |
 | 4 | **The `m_Xlx` inconsistency.** PR #20 rewrote the `Hearing()` call sites unevenly. Six protocols — DCS:215, DExtra:358, DPlus:220, NXDN:242, P25:237, YSF:300 — now pass `rpt2` as the `xlx` argument, where they previously used the 3-arg overload that sets `xlx = g_Reflector.GetCallsign()`. Three — DMRPlus:211, G3:573, USRP:227 — were converted to the 4-arg form and keep the old behaviour. `m_Xlx` is what `CUser::WriteXml()` renders as `<Via peer>` and `JsonReport()` as `ViaPeer`, so the existing XML dashboard now shows different things per protocol. In DExtra at least, `rpt2` originates as `Header->GetRpt2Callsign()` — inbound client data with only the module letter overwritten. **Ask before patching**: this may be deliberate, and it needs dbehnke's or W0CHP's intent. |
 | 5 | **`-lnng -lopus -logg` are unconditional** (Makefile:35). Unlike `DHT`, there is no `urfd.mk` toggle, so all three are hard build dependencies even for someone who never enables `[Dashboard]` or `[Audio]`. Mirror the `DHT` pattern. |
 | 6 | **The transcoder-accept guard** (Reflector.cpp:348). `if (xmlpath.empty() && jsonpath.empty() && !dashboard.enable) return;` exits `MaintenanceThread()`, which is also the only caller of `g_TCServer.Accept()` for dropped transcoder connections. Unreachable today because `XmlPath` is fatal-if-missing, but it is a trap waiting for whoever makes XML optional. Always run the loop; skip only the exporters. |
 | 7 | **`JsonReport()` omits the client IP** that `WriteXml()` includes and `dashboard/pgs/repeaters.php` displays with its `HideIP` masking options. Any JSON-or-NNG-based dashboard silently loses the column. |
 | 8 | Minor: `test_audio.cpp` is filtered out of `SRCS` (Makefile:43) but has no build rule, unlike `test_dmr`. Orphaned. |
+| 9 | ~~**`hearing.module` is blank for four protocols.**~~ **Sent: W0CHP/urfd#2 (`9541235`).** The module came from `xlx.GetCSModule()`, but G3:573, DMRPlus:211, IMRS:156 and USRP:227 pass the bare reflector callsign, whose `m_Module` stays `' '`. One line reads it from `rpt2` instead, as `CUser::JsonReport()` already does. Found while writing this relay's ingest guard. |
 
 Items 1–3 and 5–8 are mechanical. Item 4 is a question first.
 

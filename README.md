@@ -13,8 +13,32 @@ of its own so "relay down" and "reflector down" look different.
 The reflector needs no changes. Nothing here runs inside the process that routes
 voice frames.
 
-**Status:** design complete, implementation not started. See
-[docs/design.md](docs/design.md).
+**Status:** the snapshot writer works. Each `state` broadcast rewrites six
+Redis keys in one transaction with a TTL, so a stopped reflector reads as offline
+without anyone polling a file's mtime. Event streams, the heartbeat and the drop
+counters are next. See [docs/design.md](docs/design.md).
+
+## Running it
+
+```sh
+go build ./cmd/relay
+cp relay.example.yaml relay.yaml   # edit the callsign and NNG address
+./relay -config relay.yaml
+```
+
+Keys it writes, for callsign `URF999` and the default prefix:
+
+```
+urfd:URF999:reflector       HASH    callsign, modules, country, sponsor, url, updatedat
+urfd:URF999:config          JSON    the reflector's Configure block
+urfd:URF999:peers           JSON    [] when nothing is linked
+urfd:URF999:clients         JSON
+urfd:URF999:users           JSON    last heard, callsigns trimmed of padding
+urfd:URF999:activetalkers   JSON    who is keyed up right now
+```
+
+All six expire after `snapshot_ttl_factor` × the reflector's own broadcast
+interval, so their absence is the "reflector is gone" signal.
 
 ## How it fits
 
@@ -24,10 +48,14 @@ urfd ──NNG PUB──▶ relay ──▶ Redis ──▶ dashboard / exporter
 
 ## Requirements
 
-- Go 1.22+ (no cgo, no libnng — [mangos](https://go.nanomsg.org/mangos) is a
+- Go 1.24+ (no cgo, no libnng — [mangos](https://go.nanomsg.org/mangos) is a
   pure-Go NNG implementation)
 - Redis 6+ (ACL support; Streams need only Redis 5)
-- A urfd built from `w0chp/urfd` or later, with `[Dashboard] Enable = true`
+- A urfd built from `w0chp/urfd` or later, with `[Dashboard] Enable = true`,
+  **carrying the NNG event fixes** in [W0CHP/urfd#1](https://github.com/W0CHP/urfd/pull/1)
+  and [#2](https://github.com/W0CHP/urfd/pull/2). The relay needs the `timestamp`
+  and `reflector` fields those add; it refuses events without them rather than
+  guessing, and says so once per source in the log.
 
 ## Security note, up front
 

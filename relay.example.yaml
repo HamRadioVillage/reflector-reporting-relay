@@ -1,0 +1,20 @@
+# Redis is where reflector state lands. Keep it on loopback, a unix socket, or a
+# private network: once event streams are written this keyspace holds client IP
+# addresses.
+redis:
+  addr: 127.0.0.1:6379
+  db: 0
+  username: ""          # Redis 6+ ACL
+  password: ""
+  key_prefix: urfd
+
+defaults:
+  stream_maxlen: 5000
+  snapshot_ttl_factor: 3   # snapshot TTL = this x the reflector's own Interval
+  queue_depth: 4096        # NNG receive -> Redis hand-off; drops are counted
+
+# One entry per reflector. The callsign is an assertion: every event carries its
+# own reflector callsign, and a mismatch is reported rather than merged.
+sources:
+  - callsign: URF999
+    nng: tcp://127.0.0.1:5555
