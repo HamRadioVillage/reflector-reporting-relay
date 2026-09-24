@@ -178,8 +178,13 @@ USRP:227 — pass the bare reflector callsign, whose module stays `' '`. Those
 events carry `"module": " "`, which trims to empty rather than becoming a module
 named space. Everything else in the reflector gets this right: `state`'s
 `OnModule` and the XML `<On module>` both read `m_Rpt2`, and `closing` reads
-`GetStreamModule()` — so the fallback for a blank module is the next `state`
-snapshot. Fixed upstream in W0CHP/urfd#2; the guard stays for reflectors that
+`GetStreamModule()`.
+
+The relay does better than detect the gap: the `rpt2` field carries the module as
+its ninth character, and `rpt2` is the same source the upstream fix reads, so a
+blank module is **recovered** from it. Only when neither carries one is the field
+omitted -- never written as a space -- and a consumer falls back to the `state`
+snapshot. Fixed upstream in W0CHP/urfd#2; the recovery stays for reflectors that
 predate it.
 
 **No version.** `JsonReport()` publishes no reflector version — it appears only
@@ -246,8 +251,11 @@ list, and it is deliberately short.
    `MULTI`/`EXEC`, TTL = 3 × the reflector's own `Interval`. Verified against a
    live reflector and a real Redis: keys land, keys expire when the reflector
    stops, and the relay reconnects on its own when it returns.
-3. **Streams + trim.** `hearing` / `closing` / connect / disconnect into the
-   `:lastheard` and `:events` streams, with the ingest rules from §4.4.
+3. ~~**Streams + trim.**~~ **Done.** `hearing` and `closing` append to
+   `:lastheard`, connect and disconnect to `:events`, with the ingest rules from
+   §4.4. Redis-assigned stream ids supply the ordering whole-second timestamps
+   cannot. The streams carry no TTL: verified that snapshot keys expire when the
+   reflector stops while the history stays.
 4. **Heartbeat, doorbell, drop counters.**
 5. **Multi-source.**
 6. **Packaging.** systemd unit, a `.deb` or a release binary, README with the

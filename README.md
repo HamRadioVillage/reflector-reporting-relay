@@ -13,10 +13,11 @@ of its own so "relay down" and "reflector down" look different.
 The reflector needs no changes. Nothing here runs inside the process that routes
 voice frames.
 
-**Status:** the snapshot writer works. Each `state` broadcast rewrites six
-Redis keys in one transaction with a TTL, so a stopped reflector reads as offline
-without anyone polling a file's mtime. Event streams, the heartbeat and the drop
-counters are next. See [docs/design.md](docs/design.md).
+**Status:** snapshots and event history both work. Each `state` broadcast
+rewrites six Redis keys in one transaction with a TTL, so a stopped reflector
+reads as offline without anyone polling a file's mtime, and transmissions and
+links append to two streams that outlive it. The heartbeat, the doorbell and the
+drop-counter key are next. See [docs/design.md](docs/design.md).
 
 ## Running it
 
@@ -35,10 +36,26 @@ urfd:URF999:peers           JSON    [] when nothing is linked
 urfd:URF999:clients         JSON
 urfd:URF999:users           JSON    last heard, callsigns trimmed of padding
 urfd:URF999:activetalkers   JSON    who is keyed up right now
+
+urfd:URF999:lastheard       STREAM  hearing + closing, one entry per event
+urfd:URF999:events          STREAM  client_connect + client_disconnect
 ```
 
-All six expire after `snapshot_ttl_factor` × the reflector's own broadcast
-interval, so their absence is the "reflector is gone" signal.
+The six snapshot keys expire after `snapshot_ttl_factor` × the reflector's own
+broadcast interval, so their absence is the "reflector is gone" signal. The two
+streams have no TTL — they are the history, and they survive a reflector that
+does not. `XADD` uses `MAXLEN ~ stream_maxlen`.
+
+Reading history back:
+
+```sh
+redis-cli XREVRANGE urfd:URF999:lastheard + - COUNT 20   # a history page
+redis-cli XREAD BLOCK 0 STREAMS urfd:URF999:lastheard $  # a live feed
+```
+
+Stream ids are Redis-assigned, which also supplies ordering that urfd's
+whole-second `timestamp` cannot: two events in the same second still read back in
+arrival order.
 
 ## How it fits
 

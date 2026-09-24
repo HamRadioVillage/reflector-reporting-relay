@@ -1,10 +1,10 @@
 // Command relay subscribes to one or more urfd reflectors and mirrors their
 // state into Redis.
 //
-// Implemented so far: the snapshot writer. Each state broadcast rewrites the
-// six snapshot keys in one transaction with a TTL. Event streams, the
-// heartbeat and the drop-counter key are not written yet; events other than
-// state are counted and discarded.
+// Implemented so far: the snapshot writer and the event streams. Each state
+// broadcast rewrites the six snapshot keys in one transaction with a TTL;
+// transmissions append to :lastheard and links append to :events. The heartbeat
+// and drop-counter key are not written yet.
 package main
 
 import (
@@ -71,8 +71,8 @@ func main() {
 			if err := sub.Run(ctx, r.handle); err != nil && !errors.Is(err, context.Canceled) {
 				log.Printf("source %s: %v", src.Callsign, err)
 			}
-			log.Printf("source %s: stopped after %d events (%d dropped, %d snapshots written)",
-				src.Callsign, sub.Stats.Received.Load(), sub.Stats.Dropped.Load(), r.snapshots)
+			log.Printf("source %s: stopped after %d events (%d dropped, %d snapshots, %d stream entries, %d blank modules)",
+				src.Callsign, sub.Stats.Received.Load(), sub.Stats.Dropped.Load(), r.snapshots, r.appended, r.blankModules)
 		}(src, sub)
 	}
 
@@ -91,8 +91,11 @@ type relay struct {
 	store *store.Store
 
 	snapshots      uint64
+	appended       uint64
+	blankModules   uint64
 	warnedShape    bool
 	warnedMismatch map[string]bool
+	warnedType     map[string]bool
 }
 
 func (r *relay) handle(msg []byte) {
@@ -126,12 +129,25 @@ func (r *relay) handle(msg []byte) {
 		return
 	}
 
-	if env.Type != event.TypeState {
-		// Streams are the next phase; until then these are counted by the
-		// subscriber and dropped here.
-		return
+	switch env.Type {
+	case event.TypeState:
+		r.writeSnapshot(msg)
+	case event.TypeHearing, event.TypeClosing, event.TypeClientConnect, event.TypeClientDisconnect:
+		r.appendEntry(env, msg)
+	default:
+		// A message type this relay predates. Counted by the subscriber and
+		// otherwise ignored, rather than guessed at.
+		if r.warnedType == nil {
+			r.warnedType = make(map[string]bool)
+		}
+		if !r.warnedType[env.Type] {
+			r.warnedType[env.Type] = true
+			log.Printf("source %s: ignoring unknown event type %q", r.src.Callsign, env.Type)
+		}
 	}
+}
 
+func (r *relay) writeSnapshot(msg []byte) {
 	state, err := event.DecodeState(msg)
 	if err != nil {
 		log.Printf("source %s: %v", r.src.Callsign, err)
@@ -152,4 +168,44 @@ func (r *relay) handle(msg []byte) {
 	if r.snapshots == 1 {
 		log.Printf("source %s: first snapshot written to %s:* (ttl %s)", r.src.Callsign, snap.Base, snap.TTL)
 	}
+}
+
+func (r *relay) appendEntry(env event.Envelope, msg []byte) {
+	var entry *store.Entry
+	switch env.Type {
+	case event.TypeHearing:
+		h, err := event.DecodeHearing(msg)
+		if err != nil {
+			log.Printf("source %s: %v", r.src.Callsign, err)
+			return
+		}
+		if h.Module == "" {
+			// Neither the module field nor rpt2 carried one. Left empty rather
+			// than guessed; a consumer falls back to the state snapshot.
+			r.blankModules++
+		}
+		entry = store.HearingEntry(h, r.cfg.Redis.KeyPrefix)
+	case event.TypeClosing:
+		c, err := event.DecodeClosing(msg)
+		if err != nil {
+			log.Printf("source %s: %v", r.src.Callsign, err)
+			return
+		}
+		entry = store.ClosingEntry(c, r.cfg.Redis.KeyPrefix)
+	default: // client_connect, client_disconnect
+		c, err := event.DecodeClient(msg)
+		if err != nil {
+			log.Printf("source %s: %v", r.src.Callsign, err)
+			return
+		}
+		entry = store.ClientEntry(c, r.cfg.Redis.KeyPrefix)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := r.store.Append(ctx, entry, r.cfg.Defaults.StreamMaxLen); err != nil {
+		log.Printf("source %s: %v", r.src.Callsign, err)
+		return
+	}
+	r.appended++
 }
