@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -19,8 +21,14 @@ func (s *Store) Ping(ctx context.Context) error {
 	return s.c.Ping(ctx).Err()
 }
 
+// UpdatesChannel is the doorbell a consumer can subscribe to instead of polling.
+const UpdatesChannel = ":updates"
+
 // Apply writes one snapshot in a single MULTI/EXEC, so a consumer never reads
-// a half-updated reflector: the keys change together or not at all.
+// a half-updated reflector: the keys change together or not at all. The
+// doorbell PUBLISH rides in the same transaction, which means a subscriber is
+// never woken before the keys it will read are visible, and a commit never
+// happens without waking it.
 func (s *Store) Apply(ctx context.Context, snap *Snapshot) error {
 	tx := s.c.TxPipeline()
 	hash := snap.Base + ":reflector"
@@ -32,6 +40,9 @@ func (s *Store) Apply(ctx context.Context, snap *Snapshot) error {
 	for suffix, payload := range snap.JSON {
 		tx.Set(ctx, snap.Base+suffix, payload, snap.TTL)
 	}
+	// Epoch milliseconds: enough resolution to tell two commits apart, which
+	// the reflector's whole-second timestamps are not.
+	tx.Publish(ctx, snap.Base+UpdatesChannel, strconv.FormatInt(time.Now().UnixMilli(), 10))
 	if _, err := tx.Exec(ctx); err != nil {
 		return fmt.Errorf("writing snapshot for %s: %w", snap.Base, err)
 	}

@@ -1,10 +1,11 @@
 // Command relay subscribes to one or more urfd reflectors and mirrors their
 // state into Redis.
 //
-// Implemented so far: the snapshot writer and the event streams. Each state
-// broadcast rewrites the six snapshot keys in one transaction with a TTL;
-// transmissions append to :lastheard and links append to :events. The heartbeat
-// and drop-counter key are not written yet.
+// Each state broadcast rewrites the six snapshot keys in one transaction with a
+// TTL and rings a doorbell on <base>:updates; transmissions append to
+// :lastheard and links append to :events; and the relay publishes its own
+// counters to <prefix>:relay so that a dead relay and a dead reflector do not
+// look alike.
 package main
 
 import (
@@ -23,6 +24,7 @@ import (
 	"github.com/HamRadioVillage/reflector-reporting-relay/internal/config"
 	"github.com/HamRadioVillage/reflector-reporting-relay/internal/event"
 	"github.com/HamRadioVillage/reflector-reporting-relay/internal/nngsub"
+	"github.com/HamRadioVillage/reflector-reporting-relay/internal/stats"
 	"github.com/HamRadioVillage/reflector-reporting-relay/internal/store"
 )
 
@@ -57,24 +59,58 @@ func main() {
 	}
 	log.Printf("redis %s db %d, key prefix %q", cfg.Redis.Addr, cfg.Redis.DB, cfg.Redis.KeyPrefix)
 
+	started := time.Now()
+	counters := make([]*stats.Source, 0, len(cfg.Sources))
+
 	var wg sync.WaitGroup
 	for _, src := range cfg.Sources {
-		sub, err := nngsub.Dial(src.NNG, cfg.Defaults.QueueDepth)
+		counter := stats.New(src.Callsign)
+		counters = append(counters, counter)
+		sub, err := nngsub.Dial(src.NNG, cfg.Defaults.QueueDepth, counter)
 		if err != nil {
 			log.Fatalf("source %s: %v", src.Callsign, err)
 		}
 		log.Printf("source %s: subscribed to %s (queue %d)", src.Callsign, src.NNG, cfg.Defaults.QueueDepth)
 		wg.Add(1)
-		go func(src config.Source, sub *nngsub.Subscriber) {
+		go func(src config.Source, sub *nngsub.Subscriber, counter *stats.Source) {
 			defer wg.Done()
-			r := &relay{cfg: cfg, src: src, sub: sub, store: st}
+			r := &relay{cfg: cfg, src: src, store: st, stats: counter}
 			if err := sub.Run(ctx, r.handle); err != nil && !errors.Is(err, context.Canceled) {
 				log.Printf("source %s: %v", src.Callsign, err)
 			}
-			log.Printf("source %s: stopped after %d events (%d dropped, %d snapshots, %d stream entries, %d blank modules)",
-				src.Callsign, sub.Stats.Received.Load(), sub.Stats.Dropped.Load(), r.snapshots, r.appended, r.blankModules)
-		}(src, sub)
+			log.Printf("source %s: stopped after %d events (%d dropped, %d snapshots, %d stream entries, %d blank modules, %d redis errors)",
+				src.Callsign, counter.Received.Load(), counter.Dropped.Load(), counter.Snapshots.Load(),
+				counter.Entries.Load(), counter.BlankModules.Load(), counter.RedisErrors.Load())
+		}(src, sub, counter)
 	}
+
+	// The heartbeat runs on its own clock, not on event arrival: a relay
+	// watching a silent reflector still has to prove it is alive.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		beat := func() {
+			hb := store.BuildHeartbeat(cfg.Redis.KeyPrefix, started, time.Now(), counters, cfg.Defaults.HeartbeatInterval.Duration)
+			writeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := st.WriteHeartbeat(writeCtx, hb); err != nil {
+				log.Printf("heartbeat: %v", err)
+			}
+		}
+		beat() // once at startup, so the key exists before the first interval
+		t := time.NewTicker(cfg.Defaults.HeartbeatInterval.Duration)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				beat()
+			}
+		}
+	}()
+	log.Printf("heartbeat %s:relay every %s (expires after %s)", cfg.Redis.KeyPrefix,
+		cfg.Defaults.HeartbeatInterval.Duration, 3*cfg.Defaults.HeartbeatInterval.Duration)
 
 	<-ctx.Done()
 	log.Print("shutting down")
@@ -87,12 +123,9 @@ func main() {
 type relay struct {
 	cfg   *config.Config
 	src   config.Source
-	sub   *nngsub.Subscriber
 	store *store.Store
+	stats *stats.Source
 
-	snapshots      uint64
-	appended       uint64
-	blankModules   uint64
 	warnedShape    bool
 	warnedMismatch map[string]bool
 	warnedType     map[string]bool
@@ -161,12 +194,13 @@ func (r *relay) writeSnapshot(msg []byte) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := r.store.Apply(ctx, snap); err != nil {
+		r.stats.RedisErrors.Add(1)
 		log.Printf("source %s: %v", r.src.Callsign, err)
 		return
 	}
-	r.snapshots++
-	if r.snapshots == 1 {
-		log.Printf("source %s: first snapshot written to %s:* (ttl %s)", r.src.Callsign, snap.Base, snap.TTL)
+	if r.stats.Snapshots.Add(1) == 1 {
+		log.Printf("source %s: first snapshot written to %s:* (ttl %s), doorbell on %s%s",
+			r.src.Callsign, snap.Base, snap.TTL, snap.Base, store.UpdatesChannel)
 	}
 }
 
@@ -182,7 +216,7 @@ func (r *relay) appendEntry(env event.Envelope, msg []byte) {
 		if h.Module == "" {
 			// Neither the module field nor rpt2 carried one. Left empty rather
 			// than guessed; a consumer falls back to the state snapshot.
-			r.blankModules++
+			r.stats.BlankModules.Add(1)
 		}
 		entry = store.HearingEntry(h, r.cfg.Redis.KeyPrefix)
 	case event.TypeClosing:
@@ -204,8 +238,9 @@ func (r *relay) appendEntry(env event.Envelope, msg []byte) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := r.store.Append(ctx, entry, r.cfg.Defaults.StreamMaxLen); err != nil {
+		r.stats.RedisErrors.Add(1)
 		log.Printf("source %s: %v", r.src.Callsign, err)
 		return
 	}
-	r.appended++
+	r.stats.Entries.Add(1)
 }

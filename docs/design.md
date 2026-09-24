@@ -139,12 +139,37 @@ This is the payoff. urfd's in-memory last-heard list is capped at 20 entries
 and supports `XREVRANGE` for a history page and `XREAD BLOCK` for a live feed
 that can resume after a disconnect.
 
-**Relay heartbeat** — `urfd:relay` HASH: `started`, `lastevent`, per-source
-message counts, drop counts, Redis error counts. Without this, a dead relay and
-a dead reflector are indistinguishable to a dashboard.
+**Relay heartbeat** — `urfd:relay` HASH, written on its own clock every
+`heartbeat_interval` and expiring after three of them, so its absence means the
+relay is gone rather than merely quiet:
 
-**Doorbell** — `PUBLISH urfd:URF123:updates <epoch-ms>` after each snapshot
-commit, for consumers that would rather be told than poll.
+| Field | Meaning |
+|---|---|
+| `started`, `updatedat`, `interval` | when the relay came up, when it last wrote, how often it writes |
+| `sources` | the callsigns it watches, so a consumer need not scan the keyspace |
+| `lastevent` | the most recent arrival across all sources |
+| `<CS>.received`, `<CS>.dropped` | messages in, and messages the relay could not keep up with |
+| `<CS>.snapshots`, `<CS>.entries` | successful Redis writes, by kind |
+| `<CS>.blankmodules` | hearing events whose module was recoverable from neither `module` nor `rpt2` |
+| `<CS>.rediserrors` | failed writes — a rising count with a healthy reflector means the relay is the problem |
+| `<CS>.lastevent` | per-source arrival, absent until the first event rather than 1970 |
+
+Without this, the two failure modes are indistinguishable, because both end with
+the snapshot keys expiring. Verified against a live rig:
+
+| Symptom | Diagnosis |
+|---|---|
+| snapshots gone, heartbeat fresh, `lastevent` frozen | the **reflector** is down |
+| snapshots gone, heartbeat gone | the **relay** is down |
+| snapshots present, `dropped` or `rediserrors` climbing | the relay is running and losing data |
+
+The streams survive both, so history outlives whichever half failed.
+
+**Doorbell** — `PUBLISH urfd:URF123:updates <epoch-ms>` in the *same*
+`MULTI`/`EXEC` as the snapshot. A subscriber is therefore never woken before the
+keys it will read are visible, and a commit never happens without waking it.
+Epoch milliseconds, which distinguishes two commits that the reflector's
+whole-second timestamps cannot.
 
 #### 4.4 Ingest: trim, attribute, validate
 
@@ -204,6 +229,8 @@ redis:
 defaults:
   stream_maxlen: 5000
   snapshot_ttl_factor: 3
+  queue_depth: 4096
+  heartbeat_interval: 10s
 
 sources:
   - callsign: URF123
@@ -256,7 +283,10 @@ list, and it is deliberately short.
    §4.4. Redis-assigned stream ids supply the ordering whole-second timestamps
    cannot. The streams carry no TTL: verified that snapshot keys expire when the
    reflector stops while the history stays.
-4. **Heartbeat, doorbell, drop counters.**
+4. ~~**Heartbeat, doorbell, drop counters.**~~ **Done.** `<prefix>:relay` with
+   per-source counters, a doorbell inside the snapshot transaction, and drop and
+   Redis-error counts. Verified that a dead reflector and a dead relay produce
+   different symptoms.
 5. **Multi-source.**
 6. **Packaging.** systemd unit, a `.deb` or a release binary, README with the
    security guidance from §4.6 stated plainly.

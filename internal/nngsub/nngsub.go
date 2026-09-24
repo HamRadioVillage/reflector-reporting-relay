@@ -11,36 +11,30 @@ package nngsub
 import (
 	"context"
 	"fmt"
-	"sync/atomic"
 	"time"
 
 	"go.nanomsg.org/mangos/v3"
 	"go.nanomsg.org/mangos/v3/protocol/sub"
+
+	"github.com/HamRadioVillage/reflector-reporting-relay/internal/stats"
 
 	// Transports urfd's NNGAddr can name.
 	_ "go.nanomsg.org/mangos/v3/transport/ipc"
 	_ "go.nanomsg.org/mangos/v3/transport/tcp"
 )
 
-// Stats are the counters a heartbeat key will expose.
-type Stats struct {
-	Received  atomic.Uint64
-	Dropped   atomic.Uint64
-	LastEvent atomic.Int64 // unix seconds
-}
-
 // Subscriber is one reflector's event stream.
 type Subscriber struct {
 	addr  string
 	sock  mangos.Socket
 	queue chan []byte
-	Stats Stats
+	stats *stats.Source
 }
 
 // Dial connects a SUB socket subscribed to everything. urfd publishes a handful
 // of message types on one socket and the relay wants all of them, so filtering
 // happens on type after decode, not on a prefix here.
-func Dial(addr string, depth int) (*Subscriber, error) {
+func Dial(addr string, depth int, st *stats.Source) (*Subscriber, error) {
 	sock, err := sub.NewSocket()
 	if err != nil {
 		return nil, fmt.Errorf("creating SUB socket: %w", err)
@@ -60,7 +54,7 @@ func Dial(addr string, depth int) (*Subscriber, error) {
 		sock.Close()
 		return nil, fmt.Errorf("dialing %s: %w", addr, err)
 	}
-	return &Subscriber{addr: addr, sock: sock, queue: make(chan []byte, depth)}, nil
+	return &Subscriber{addr: addr, sock: sock, queue: make(chan []byte, depth), stats: st}, nil
 }
 
 func (s *Subscriber) Addr() string { return s.addr }
@@ -84,12 +78,14 @@ func (s *Subscriber) Run(ctx context.Context, handle func([]byte)) error {
 				// mangos redials underneath us.
 				continue
 			}
-			s.Stats.Received.Add(1)
-			s.Stats.LastEvent.Store(time.Now().Unix())
+			s.stats.MarkEvent(time.Now())
 			select {
 			case s.queue <- msg:
 			default:
-				s.Stats.Dropped.Add(1)
+				// The relay could not keep up with itself. Counted here and
+				// published in the heartbeat, because a silently lossy relay
+				// is the one failure a consumer cannot detect.
+				s.stats.Dropped.Add(1)
 			}
 		}
 	}()

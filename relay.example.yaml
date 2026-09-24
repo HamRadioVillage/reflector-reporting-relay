@@ -12,6 +12,7 @@ defaults:
   stream_maxlen: 5000
   snapshot_ttl_factor: 3   # snapshot TTL = this x the reflector's own Interval
   queue_depth: 4096        # NNG receive -> Redis hand-off; drops are counted
+  heartbeat_interval: 10s  # <prefix>:relay is rewritten this often, expires after 3x
 
 # One entry per reflector. The callsign is an assertion: every event carries its
 # own reflector callsign, and a mismatch is reported rather than merged.

@@ -13,11 +13,12 @@ of its own so "relay down" and "reflector down" look different.
 The reflector needs no changes. Nothing here runs inside the process that routes
 voice frames.
 
-**Status:** snapshots and event history both work. Each `state` broadcast
-rewrites six Redis keys in one transaction with a TTL, so a stopped reflector
-reads as offline without anyone polling a file's mtime, and transmissions and
-links append to two streams that outlive it. The heartbeat, the doorbell and the
-drop-counter key are next. See [docs/design.md](docs/design.md).
+**Status:** working for snapshots, history and self-reporting. Each `state`
+broadcast rewrites six Redis keys in one transaction with a TTL and rings a
+doorbell; transmissions and links append to two streams that outlive the
+reflector; and the relay publishes its own counters so a dead relay and a dead
+reflector look different. Multi-source and packaging remain. See
+[docs/design.md](docs/design.md).
 
 ## Running it
 
@@ -39,6 +40,9 @@ urfd:URF999:activetalkers   JSON    who is keyed up right now
 
 urfd:URF999:lastheard       STREAM  hearing + closing, one entry per event
 urfd:URF999:events          STREAM  client_connect + client_disconnect
+
+urfd:relay                  HASH    the relay's own counters, one per relay
+urfd:URF999:updates         PUBSUB  epoch-ms, published on each snapshot commit
 ```
 
 The six snapshot keys expire after `snapshot_ttl_factor` × the reflector's own
@@ -56,6 +60,24 @@ redis-cli XREAD BLOCK 0 STREAMS urfd:URF999:lastheard $  # a live feed
 Stream ids are Redis-assigned, which also supplies ordering that urfd's
 whole-second `timestamp` cannot: two events in the same second still read back in
 arrival order.
+
+## Telling the two failure modes apart
+
+Both a dead reflector and a dead relay end with the snapshot keys expiring, so
+the relay reports on itself:
+
+```sh
+redis-cli HGETALL urfd:relay
+redis-cli SUBSCRIBE urfd:URF999:updates   # or wait to be told
+```
+
+| Symptom | Diagnosis |
+|---|---|
+| snapshots gone, `urfd:relay` fresh, its `lastevent` frozen | the reflector is down |
+| snapshots gone, `urfd:relay` gone | the relay is down |
+| snapshots fine, `URF999.dropped` or `URF999.rediserrors` climbing | the relay is running and losing data |
+
+The streams outlive both.
 
 ## How it fits
 
