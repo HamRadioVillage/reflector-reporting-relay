@@ -287,7 +287,18 @@ list, and it is deliberately short.
    per-source counters, a doorbell inside the snapshot transaction, and drop and
    Redis-error counts. Verified that a dead reflector and a dead relay produce
    different symptoms.
-5. **Multi-source.**
+5. ~~**Multi-source.**~~ **Done.** One relay, several reflectors, one keyspace.
+   Verified with two reflectors on one host: each writes its own
+   `<prefix>:<callsign>:*` keys, streams and doorbell channel, and the heartbeat
+   carries independent counters plus a `sources` field. A source whose
+   configured callsign does not match what arrives is reported once and skipped
+   rather than merged, which shows up in the heartbeat as `received` climbing
+   while `snapshots` and `entries` stay at zero.
+
+   Running two reflectors on one host needs `DHT = false` in `urfd.mk`:
+   `Reflector.cpp:59` hardcodes the OpenDHT port to `17171`, and the second
+   instance dies on an uncaught `dht::DhtException` rather than reporting the
+   conflict. See Part B, item 10.
 6. **Packaging.** systemd unit, a `.deb` or a release binary, README with the
    security guidance from §4.6 stated plainly.
 
@@ -311,6 +322,7 @@ value. All line numbers are from `cee46d1`.
 | 6 | **The transcoder-accept guard** (Reflector.cpp:348). `if (xmlpath.empty() && jsonpath.empty() && !dashboard.enable) return;` exits `MaintenanceThread()`, which is also the only caller of `g_TCServer.Accept()` for dropped transcoder connections. Unreachable today because `XmlPath` is fatal-if-missing, but it is a trap waiting for whoever makes XML optional. Always run the loop; skip only the exporters. |
 | 7 | **`JsonReport()` omits the client IP** that `WriteXml()` includes and `dashboard/pgs/repeaters.php` displays with its `HideIP` masking options. Any JSON-or-NNG-based dashboard silently loses the column. |
 | 8 | Minor: `test_audio.cpp` is filtered out of `SRCS` (Makefile:43) but has no build rule, unlike `test_dmr`. Orphaned. |
+| 10 | **The DHT port is hardcoded and its failure is fatal.** `Reflector.cpp:59` calls `node.run(17171, ...)` with no way to change the port and no `try`/`catch`, unlike the thread starts a few lines below which report failures cleanly. A second reflector on the same host therefore aborts with `terminate called after throwing an instance of 'dht::DhtException' / what(): Can't bind socket` and SIGABRT. Two small fixes: an ini key for the port, and a `catch` that says which port could not be bound. Found while testing the relay against two reflectors. |
 | 9 | ~~**`hearing.module` is blank for four protocols.**~~ **Sent: W0CHP/urfd#2 (`9541235`).** The module came from `xlx.GetCSModule()`, but G3:573, DMRPlus:211, IMRS:156 and USRP:227 pass the bare reflector callsign, whose `m_Module` stays `' '`. One line reads it from `rpt2` instead, as `CUser::JsonReport()` already does. Found while writing this relay's ingest guard. |
 
 Items 1–3 and 5–8 are mechanical. Item 4 is a question first.

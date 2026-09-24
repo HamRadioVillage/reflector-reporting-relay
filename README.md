@@ -13,12 +13,13 @@ of its own so "relay down" and "reflector down" look different.
 The reflector needs no changes. Nothing here runs inside the process that routes
 voice frames.
 
-**Status:** working for snapshots, history and self-reporting. Each `state`
+**Status:** working for snapshots, history, self-reporting and several
+reflectors at once. Each `state`
 broadcast rewrites six Redis keys in one transaction with a TTL and rings a
 doorbell; transmissions and links append to two streams that outlive the
 reflector; and the relay publishes its own counters so a dead relay and a dead
-reflector look different. Multi-source and packaging remain. See
-[docs/design.md](docs/design.md).
+reflector look different. One relay can watch several reflectors into one
+keyspace. Packaging remains. See [docs/design.md](docs/design.md).
 
 ## Running it
 
@@ -78,6 +79,28 @@ redis-cli SUBSCRIBE urfd:URF999:updates   # or wait to be told
 | snapshots fine, `URF999.dropped` or `URF999.rediserrors` climbing | the relay is running and losing data |
 
 The streams outlive both.
+
+## Watching several reflectors
+
+List each one under `sources`. They share a keyspace, separated by callsign, and
+each gets its own streams and doorbell channel:
+
+```yaml
+sources:
+  - callsign: URF999
+    nng: tcp://127.0.0.1:5555
+  - callsign: URF301
+    nng: tcp://127.0.0.1:5556
+```
+
+Run one relay per *host* where a reflector lives, rather than one relay reaching
+across the network to several — the NNG listener has no authentication and the
+event stream carries client IPs, so it stays on loopback. Several relays can
+write to one shared Redis over a VPN.
+
+The `callsign` is checked against what arrives. A source pointed at the wrong
+reflector logs once and writes nothing, which reads in the heartbeat as
+`<CS>.received` climbing while `<CS>.snapshots` stays at zero.
 
 ## How it fits
 

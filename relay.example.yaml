@@ -19,3 +19,8 @@ defaults:
 sources:
   - callsign: URF999
     nng: tcp://127.0.0.1:5555
+  # A second reflector on the same host shares the keyspace, separated by
+  # callsign. Note that urfd hardcodes its OpenDHT port, so two reflectors on
+  # one machine need DHT = false in urfd.mk.
+  # - callsign: URF301
+  #   nng: tcp://127.0.0.1:5556
