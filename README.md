@@ -135,6 +135,11 @@ make dist
 scp dist/relay-*-linux-amd64.tar.gz reflector-host:/tmp/
 ```
 
+Tagged versions are built and published automatically — see
+[Releases](https://github.com/HamRadioVillage/reflector-reporting-relay/releases)
+for prebuilt tarballs and their checksums, so there is usually nothing to build
+at all.
+
 If you would rather build *on* the reflector host, it needs **Go 1.24 or
 newer**. Go 1.19, which is what Debian 12 ships as `golang-go`, fails on
 `go-redis` with `package cmp is not in GOROOT` — `cmp`, `maps` and `slices`

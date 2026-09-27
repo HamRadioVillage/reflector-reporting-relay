@@ -1,0 +1,97 @@
+name: release
+
+# Tag a version and the binaries follow:
+#
+#   git tag -a v0.1.1 -m "what changed" && git push origin v0.1.1
+#
+# A manual run builds the same artifacts without publishing anything, which is
+# how to check this workflow without spending a version number on it.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write   # to create the release; nothing else is needed
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The Makefile stamps the version with `git describe --tags`, which
+          # needs the tags and the history, not just the tagged commit.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          # Whatever go.mod asks for, so this cannot drift from the module.
+          go-version-file: go.mod
+          check-latest: true
+
+      # `dist` depends on `test`, which runs `go vet` and `go test ./...`, so a
+      # failing test is a failed release rather than a published one.
+      - name: Build release artifacts
+        run: make dist
+
+      # A tag push must produce binaries that report that tag. This catches a
+      # shallow checkout, an unfetched tag, or a dirty tree -- each of which
+      # silently produces a misleading -version -- before anything is published.
+      - name: Verify the binaries report the tag
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          tar -xzf "dist/relay-${tag}-linux-amd64.tar.gz" -C /tmp
+          got="$(/tmp/relay-${tag}-linux-amd64/relay -version)"
+          echo "tag=${tag} binary=${got}"
+          test "${tag}" = "${got}"
+
+      - name: Write the release notes
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          prev="$(git describe --tags --abbrev=0 "${tag}^" 2>/dev/null || true)"
+          {
+            echo "Static binaries: no cgo, no libnng, and no Go toolchain needed on the"
+            echo "reflector host. Check your download against \`SHA256SUMS\`. Each tarball"
+            echo "also carries the systemd unit, \`relay.example.yaml\`, the README and the"
+            echo "licence."
+            echo
+            echo "| file | for |"
+            echo "|---|---|"
+            echo "| \`relay-${tag}-linux-amd64.tar.gz\` | a VPS, or any x86-64 host |"
+            echo "| \`relay-${tag}-linux-arm64.tar.gz\` | Raspberry Pi 3/4/5 on a 64-bit OS |"
+            echo "| \`relay-${tag}-linux-arm.tar.gz\` | 32-bit ARM, GOARM=7 |"
+            if [ -n "${prev}" ]; then
+              echo
+              echo "## Changes since ${prev}"
+              echo
+              git log --no-merges --pretty='- %s' "${prev}..${tag}"
+            fi
+          } > release-notes.md
+          cat release-notes.md
+
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            dist/*.tar.gz dist/SHA256SUMS \
+            --title "${GITHUB_REF_NAME}" \
+            --notes-file release-notes.md
+
+      # A manual run has nothing to publish, so the artifacts stay on the run.
+      - name: Upload artifacts (manual runs)
+        if: "!startsWith(github.ref, 'refs/tags/')"
+        uses: actions/upload-artifact@v4
+        with:
+          name: relay-binaries
+          path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          if-no-files-found: error
