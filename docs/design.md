@@ -145,6 +145,7 @@ relay is gone rather than merely quiet:
 
 | Field | Meaning |
 |---|---|
+| `version` | the relay's own version, which matters when one keyspace is fed by relays on several hosts |
 | `started`, `updatedat`, `interval` | when the relay came up, when it last wrote, how often it writes |
 | `sources` | the callsigns it watches, so a consumer need not scan the keyspace |
 | `lastevent` | the most recent arrival across all sources |
@@ -299,8 +300,15 @@ list, and it is deliberately short.
    `Reflector.cpp:59` hardcodes the OpenDHT port to `17171`, and the second
    instance dies on an uncaught `dht::DhtException` rather than reporting the
    conflict. See Part B, item 10.
-6. **Packaging.** systemd unit, a `.deb` or a release binary, README with the
-   security guidance from §4.6 stated plainly.
+6. ~~**Packaging.**~~ **Done.** A `Makefile` with `build`, `test`, `dist` and
+   `install`; a hardened systemd unit (unprivileged user, empty capability set,
+   `ProtectSystem=strict`, `RestrictAddressFamilies`, optional
+   `IPAddressAllow=localhost`), verified with `systemd-analyze verify`; static
+   release tarballs for `linux/amd64`, `linux/arm64` and `linux/arm` with
+   checksums, since reflectors run on VPSes and on Pis; a `-version` flag with
+   the version stamped at build time and republished in the heartbeat; and §4.6's
+   security guidance stated plainly in the README. No `.deb`: the tarball plus
+   `make install` covers the same ground without dpkg tooling to maintain.
 
 Step 1 is the important one: it validates every assumption in this document
 against a running reflector before any Redis code exists.

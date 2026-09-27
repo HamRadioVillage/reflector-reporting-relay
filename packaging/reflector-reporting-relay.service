@@ -1,0 +1,53 @@
+[Unit]
+Description=urfd NNG to Redis reporting relay
+Documentation=https://github.com/HamRadioVillage/reflector-reporting-relay
+# The relay dials urfd's NNG socket and Redis, and reconnects on its own, so it
+# neither requires nor waits for either. Ordering only.
+After=network-online.target redis-server.service urfd.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=urfdrelay
+Group=urfdrelay
+ExecStart=/usr/local/bin/relay -config /etc/reflector-reporting-relay/relay.yaml
+Restart=on-failure
+RestartSec=5s
+# Logs go to stdout, so journalctl -u reflector-reporting-relay is the log.
+StandardOutput=journal
+StandardError=journal
+
+# The relay needs no privileges at all: it reads one config file, opens two
+# outbound sockets, and writes nothing to disk.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# Uncomment when the relay, urfd and Redis are all on this host, which is the
+# recommended layout. It stops the relay reaching the network at all. Leave it
+# commented if Redis is remote over a VPN.
+#IPAddressDeny=any
+#IPAddressAllow=localhost
+
+[Install]
+WantedBy=multi-user.target

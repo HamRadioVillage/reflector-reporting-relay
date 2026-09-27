@@ -24,7 +24,7 @@ keyspace. Packaging remains. See [docs/design.md](docs/design.md).
 ## Running it
 
 ```sh
-go build ./cmd/relay
+make                               # or: go build ./cmd/relay
 cp relay.example.yaml relay.yaml   # edit the callsign and NNG address
 ./relay -config relay.yaml
 ```
@@ -119,14 +119,66 @@ urfd ──NNG PUB──▶ relay ──▶ Redis ──▶ dashboard / exporter
   and `reflector` fields those add; it refuses events without them rather than
   guessing, and says so once per source in the log.
 
+## Installing it
+
+Release tarballs carry a static binary — no cgo, no libnng, nothing to install
+alongside it — for `linux/amd64`, `linux/arm64` and `linux/arm` (GOARM=7), which
+covers a VPS and a Raspberry Pi. `make dist` builds all three with checksums.
+
+```sh
+# a system user with no home, no shell and no privileges
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin urfdrelay
+
+sudo make install                  # binary, unit file, example config
+sudo cp /etc/reflector-reporting-relay/relay.example.yaml \
+        /etc/reflector-reporting-relay/relay.yaml
+sudo chown root:urfdrelay /etc/reflector-reporting-relay/relay.yaml
+sudo chmod 0640 /etc/reflector-reporting-relay/relay.yaml   # it may hold a Redis password
+sudoedit /etc/reflector-reporting-relay/relay.yaml
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now reflector-reporting-relay
+journalctl -fu reflector-reporting-relay
+```
+
+The unit runs the relay as `urfdrelay` with no capabilities at all, a read-only
+filesystem, a private `/tmp`, and `RestrictAddressFamilies` limited to inet and
+unix sockets — the relay reads one config file, opens two outbound sockets and
+writes nothing to disk, so it needs nothing else. It restarts on failure and
+logs to the journal.
+
+If the relay, urfd and Redis all live on this host, which is the recommended
+layout, uncomment these two lines in the unit to stop the relay reaching the
+network at all:
+
+```ini
+IPAddressDeny=any
+IPAddressAllow=localhost
+```
+
+Leave them commented if Redis is remote over a VPN.
+
 ## Security note, up front
 
-urfd's NNG publisher has **no authentication and no encryption**, and the event
-stream carries **client IP addresses**. Leave `NNGAddr` on `127.0.0.1` and run
-the relay on the reflector host. To feed a central dashboard, run one relay per
-reflector locally and point them all at a shared Redis over a VPN — do not widen
-the NNG listener to `0.0.0.0`. Redis has the same caveat: loopback, unix socket,
-or a private network.
+urfd's NNG publisher has **no authentication and no encryption** — anything that
+can reach the port gets the whole event stream after an eight-byte handshake —
+and that stream carries **client IP addresses**, in both `client_connect` and
+`client_disconnect`.
+
+So:
+
+- **Leave `NNGAddr` on `127.0.0.1`** and run the relay on the reflector's own
+  host. Widening it to `0.0.0.0` so a remote relay can dial in publishes your
+  users' IP addresses to anyone who can reach the port.
+- **The Redis keyspace inherits that**, because `<base>:events` stores the IPs it
+  was sent. Loopback, a unix socket, or a private network — and a password or ACL
+  user if anything else shares that Redis.
+- **To feed a central dashboard**, run one relay per reflector, each on its own
+  reflector's host, all writing to one shared Redis over WireGuard or an
+  equivalent. That keeps the unauthenticated hop on loopback and puts the
+  authenticated one on the wire.
+- **The relay needs no privileges.** Do not run it as root; the shipped unit
+  runs it as an unprivileged system user with an empty capability set.
 
 ## License
 

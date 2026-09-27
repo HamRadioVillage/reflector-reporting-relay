@@ -27,7 +27,7 @@ type Heartbeat struct {
 
 // BuildHeartbeat renders the relay's state as hash fields. Pure, so what a
 // dashboard will read is testable without a Redis.
-func BuildHeartbeat(prefix string, started, now time.Time, sources []*stats.Source, interval time.Duration) *Heartbeat {
+func BuildHeartbeat(prefix, version string, started, now time.Time, sources []*stats.Source, interval time.Duration) *Heartbeat {
 	hb := &Heartbeat{
 		Key: prefix + HeartbeatKey,
 		TTL: 3 * interval,
@@ -35,6 +35,10 @@ func BuildHeartbeat(prefix string, started, now time.Time, sources []*stats.Sour
 			"started":   started.UTC().Format(time.RFC3339),
 			"updatedat": now.UTC().Format(time.RFC3339),
 			"interval":  interval.String(),
+			// The relay reports its own version even though the reflector
+			// publishes none: worth having when one keyspace is fed by relays
+			// on several hosts that were not all updated together.
+			"version": version,
 		},
 	}
 

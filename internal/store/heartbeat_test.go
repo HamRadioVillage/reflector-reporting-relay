@@ -19,7 +19,7 @@ func TestBuildHeartbeatFields(t *testing.T) {
 	a.RedisErrors.Add(1)
 	b := stats.New("URF301") // configured but silent so far
 
-	hb := BuildHeartbeat("urfd", started, now, []*stats.Source{a, b}, 10*time.Second)
+	hb := BuildHeartbeat("urfd", "v0.3.0", started, now, []*stats.Source{a, b}, 10*time.Second)
 
 	if hb.Key != "urfd:relay" {
 		t.Errorf("Key = %q, want %q", hb.Key, "urfd:relay")
@@ -29,6 +29,7 @@ func TestBuildHeartbeatFields(t *testing.T) {
 		t.Errorf("TTL = %v, want 30s", hb.TTL)
 	}
 	for field, want := range map[string]string{
+		"version":             "v0.3.0",
 		"started":             "2026-09-24T05:00:00Z",
 		"updatedat":           "2026-09-24T05:01:30Z",
 		"interval":            "10s",
@@ -58,7 +59,7 @@ func TestBuildHeartbeatFields(t *testing.T) {
 // difference between "relay is down" and "reflector is quiet".
 func TestBuildHeartbeatWithNoTrafficYet(t *testing.T) {
 	now := time.Date(2026, 9, 24, 5, 0, 0, 0, time.UTC)
-	hb := BuildHeartbeat("urfd", now, now, []*stats.Source{stats.New("URF999")}, 10*time.Second)
+	hb := BuildHeartbeat("urfd", "dev", now, now, []*stats.Source{stats.New("URF999")}, 10*time.Second)
 	if _, ok := hb.Fields["lastevent"]; ok {
 		t.Error("Fields[lastevent] present with no traffic, want absent")
 	}

@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -28,9 +29,19 @@ import (
 	"github.com/HamRadioVillage/reflector-reporting-relay/internal/store"
 )
 
+// version is stamped at build time with
+// -ldflags "-X main.version=$(git describe --tags --always --dirty)".
+var version = "dev"
+
 func main() {
 	cfgPath := flag.String("config", "relay.yaml", "path to the relay config file")
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(version)
+		return
+	}
 
 	log.SetFlags(log.LstdFlags | log.LUTC)
 
@@ -57,6 +68,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("redis at %s: %v", cfg.Redis.Addr, err)
 	}
+	log.Printf("reflector-reporting-relay %s", version)
 	log.Printf("redis %s db %d, key prefix %q", cfg.Redis.Addr, cfg.Redis.DB, cfg.Redis.KeyPrefix)
 
 	started := time.Now()
@@ -90,7 +102,7 @@ func main() {
 	go func() {
 		defer wg.Done()
 		beat := func() {
-			hb := store.BuildHeartbeat(cfg.Redis.KeyPrefix, started, time.Now(), counters, cfg.Defaults.HeartbeatInterval.Duration)
+			hb := store.BuildHeartbeat(cfg.Redis.KeyPrefix, version, started, time.Now(), counters, cfg.Defaults.HeartbeatInterval.Duration)
 			writeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			if err := st.WriteHeartbeat(writeCtx, hb); err != nil {
