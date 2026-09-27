@@ -296,10 +296,11 @@ list, and it is deliberately short.
    rather than merged, which shows up in the heartbeat as `received` climbing
    while `snapshots` and `entries` stay at zero.
 
-   Running two reflectors on one host needs `DHT = false` in `urfd.mk`:
-   `Reflector.cpp:59` hardcodes the OpenDHT port to `17171`, and the second
-   instance dies on an uncaught `dht::DhtException` rather than reporting the
-   conflict. See Part B, item 10.
+   Running two reflectors on one host used to need `DHT = false` in `urfd.mk`,
+   because the OpenDHT port was hardcoded and the second instance died on an
+   uncaught `dht::DhtException`. Fixed upstream in W0CHP/urfd#3: give the second
+   reflector its own `[Names]DhtPort`, or `0` for any free port. See Part B,
+   item 10.
 6. ~~**Packaging.**~~ **Done.** A `Makefile` with `build`, `test`, `dist` and
    `install`; a hardened systemd unit (unprivileged user, empty capability set,
    `ProtectSystem=strict`, `RestrictAddressFamilies`, optional
@@ -322,16 +323,16 @@ value. All line numbers are from `cee46d1`.
 
 | # | Change | Why it matters |
 |---|---|---|
-| 1 | ~~**Stop publishing under reflector mutexes.**~~ **Sent: W0CHP/urfd#1 (`ed79fc9`).** `Publish()` is called from `CUsers::Hearing()` (Users.cpp:77), `CUsers::Closing()` (Users.cpp:90) and `CClients::AddClient`/`RemoveClient` (Clients.cpp:71, 100) — all with the users or clients mutex held, on protocol threads. `Publish()` does `event.dump()` (JSON serialization plus allocation) and takes its own mutex before the non-blocking send. `NONBLOCK` bounds it, so this is contention rather than deadlock, but it is per-transmission serialization on a hot path under a lock every protocol thread needs. Hand off to a bounded queue drained by the maintenance thread; `CSafePacketQueue` is the existing pattern. |
-| 2 | ~~**Add `timestamp` and `callsign` to every event.**~~ **Sent: W0CHP/urfd#1 (`683d305`).** Landed as `timestamp` plus `reflector` — not `callsign`, which already means the station an event is about. Follow-up: whole-second precision cannot order two events in the same second. |
-| 3 | ~~**Fix the `hearing` field names.**~~ **Sent: W0CHP/urfd#1 (`d0c9477`).** Users.cpp:70–76 wrote `event["ur"] = rpt1`, `event["rpt1"] = rpt2`, `event["rpt2"] = xlx` — each label holding the *next* field's value. Now `callsign`, `repeater`, `rpt2`, `via_peer`. Breaking change for any existing subscriber. |
+| 1 | ~~**Stop publishing under reflector mutexes.**~~ **Merged: W0CHP/urfd#1.** `Publish()` is called from `CUsers::Hearing()` (Users.cpp:77), `CUsers::Closing()` (Users.cpp:90) and `CClients::AddClient`/`RemoveClient` (Clients.cpp:71, 100) — all with the users or clients mutex held, on protocol threads. `Publish()` does `event.dump()` (JSON serialization plus allocation) and takes its own mutex before the non-blocking send. `NONBLOCK` bounds it, so this is contention rather than deadlock, but it is per-transmission serialization on a hot path under a lock every protocol thread needs. Hand off to a bounded queue drained by the maintenance thread; `CSafePacketQueue` is the existing pattern. |
+| 2 | ~~**Add `timestamp` and `callsign` to every event.**~~ **Merged: W0CHP/urfd#1.** Landed as `timestamp` plus `reflector` — not `callsign`, which already means the station an event is about. Follow-up: whole-second precision cannot order two events in the same second. |
+| 3 | ~~**Fix the `hearing` field names.**~~ **Merged: W0CHP/urfd#1.** Users.cpp:70–76 wrote `event["ur"] = rpt1`, `event["rpt1"] = rpt2`, `event["rpt2"] = xlx` — each label holding the *next* field's value. Now `callsign`, `repeater`, `rpt2`, `via_peer`. Breaking change for any existing subscriber. |
 | 4 | **The `m_Xlx` inconsistency.** PR #20 rewrote the `Hearing()` call sites unevenly. Six protocols — DCS:215, DExtra:358, DPlus:220, NXDN:242, P25:237, YSF:300 — now pass `rpt2` as the `xlx` argument, where they previously used the 3-arg overload that sets `xlx = g_Reflector.GetCallsign()`. Three — DMRPlus:211, G3:573, USRP:227 — were converted to the 4-arg form and keep the old behaviour. `m_Xlx` is what `CUser::WriteXml()` renders as `<Via peer>` and `JsonReport()` as `ViaPeer`, so the existing XML dashboard now shows different things per protocol. In DExtra at least, `rpt2` originates as `Header->GetRpt2Callsign()` — inbound client data with only the module letter overwritten. **Ask before patching**: this may be deliberate, and it needs dbehnke's or W0CHP's intent. |
 | 5 | **`-lnng -lopus -logg` are unconditional** (Makefile:35). Unlike `DHT`, there is no `urfd.mk` toggle, so all three are hard build dependencies even for someone who never enables `[Dashboard]` or `[Audio]`. Mirror the `DHT` pattern. |
 | 6 | **The transcoder-accept guard** (Reflector.cpp:348). `if (xmlpath.empty() && jsonpath.empty() && !dashboard.enable) return;` exits `MaintenanceThread()`, which is also the only caller of `g_TCServer.Accept()` for dropped transcoder connections. Unreachable today because `XmlPath` is fatal-if-missing, but it is a trap waiting for whoever makes XML optional. Always run the loop; skip only the exporters. |
 | 7 | **`JsonReport()` omits the client IP** that `WriteXml()` includes and `dashboard/pgs/repeaters.php` displays with its `HideIP` masking options. Any JSON-or-NNG-based dashboard silently loses the column. |
 | 8 | Minor: `test_audio.cpp` is filtered out of `SRCS` (Makefile:43) but has no build rule, unlike `test_dmr`. Orphaned. |
-| 10 | **The DHT port is hardcoded and its failure is fatal.** `Reflector.cpp:59` calls `node.run(17171, ...)` with no way to change the port and no `try`/`catch`, unlike the thread starts a few lines below which report failures cleanly. A second reflector on the same host therefore aborts with `terminate called after throwing an instance of 'dht::DhtException' / what(): Can't bind socket` and SIGABRT. Two small fixes: an ini key for the port, and a `catch` that says which port could not be bound. Found while testing the relay against two reflectors. |
-| 9 | ~~**`hearing.module` is blank for four protocols.**~~ **Sent: W0CHP/urfd#2 (`9541235`).** The module came from `xlx.GetCSModule()`, but G3:573, DMRPlus:211, IMRS:156 and USRP:227 pass the bare reflector callsign, whose `m_Module` stays `' '`. One line reads it from `rpt2` instead, as `CUser::JsonReport()` already does. Found while writing this relay's ingest guard. |
+| 10 | ~~**The DHT port is hardcoded and its failure is fatal.**~~ **Merged: W0CHP/urfd#3.** Now `[Names]DhtPort` (default 17171, `0` for any free port), and a bind failure warns and carries on instead of aborting. Originally: `Reflector.cpp:59` called `node.run(17171, ...)` with no way to change the port and no `try`/`catch`, unlike the thread starts a few lines below which report failures cleanly. A second reflector on the same host therefore aborts with `terminate called after throwing an instance of 'dht::DhtException' / what(): Can't bind socket` and SIGABRT. Two small fixes: an ini key for the port, and a `catch` that says which port could not be bound. Found while testing the relay against two reflectors. |
+| 9 | ~~**`hearing.module` is blank for four protocols.**~~ **Merged: W0CHP/urfd#2.** The module came from `xlx.GetCSModule()`, but G3:573, DMRPlus:211, IMRS:156 and USRP:227 pass the bare reflector callsign, whose `m_Module` stays `' '`. One line reads it from `rpt2` instead, as `CUser::JsonReport()` already does. Found while writing this relay's ingest guard. |
 
 Items 1–3 and 5–8 are mechanical. Item 4 is a question first.
 

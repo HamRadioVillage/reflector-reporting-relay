@@ -113,11 +113,14 @@ urfd ──NNG PUB──▶ relay ──▶ Redis ──▶ dashboard / exporter
 - Go 1.24+ (no cgo, no libnng — [mangos](https://go.nanomsg.org/mangos) is a
   pure-Go NNG implementation)
 - Redis 6+ (ACL support; Streams need only Redis 5)
-- A urfd built from `w0chp/urfd` or later, with `[Dashboard] Enable = true`,
-  **carrying the NNG event fixes** in [W0CHP/urfd#1](https://github.com/W0CHP/urfd/pull/1)
-  and [#2](https://github.com/W0CHP/urfd/pull/2). The relay needs the `timestamp`
-  and `reflector` fields those add; it refuses events without them rather than
-  guessing, and says so once per source in the log.
+- A urfd built from [W0CHP/urfd](https://github.com/W0CHP/urfd) at `ac34d27`
+  or later, with `[Dashboard] Enable = true`. The relay needs the `timestamp` and
+  `reflector` fields and the corrected `hearing` field names that
+  [#1](https://github.com/W0CHP/urfd/pull/1),
+  [#2](https://github.com/W0CHP/urfd/pull/2) and
+  [#3](https://github.com/W0CHP/urfd/pull/3) added — all merged upstream, so a
+  current `main` has them. An older reflector's events are refused rather than
+  guessed at, and the relay says so once per source in the log.
 
 ## Installing it
 
