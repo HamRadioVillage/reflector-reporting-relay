@@ -124,10 +124,61 @@ func main() {
 	log.Printf("heartbeat %s:relay every %s (expires after %s)", cfg.Redis.KeyPrefix,
 		cfg.Defaults.HeartbeatInterval.Duration, 3*cfg.Defaults.HeartbeatInterval.Duration)
 
+	// One line per source per interval, so the journal shows the relay is alive
+	// without a line per event. Nothing else is logged while things are working,
+	// which is right for a service but leaves an operator with nothing to look
+	// at between a restart and a fault.
+	if every := cfg.Defaults.SummaryInterval.Duration; every > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			logSummaries(ctx, started, counters, every)
+		}()
+		log.Printf("summary every %s", every)
+	}
+
 	<-ctx.Done()
 	log.Print("shutting down")
 	wg.Wait()
 	os.Exit(0)
+}
+
+// logSummaries reports what each source did in the last window, and what it has
+// done since startup. Deltas come first because "0 events in the last hour" is
+// the interesting statement; a monotonic total never says that.
+func logSummaries(ctx context.Context, started time.Time, sources []*stats.Source, every time.Duration) {
+	type seen struct{ received, snapshots, entries, dropped, errs uint64 }
+	last := make(map[*stats.Source]seen, len(sources))
+
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			for _, s := range sources {
+				now := seen{
+					received:  s.Received.Load(),
+					snapshots: s.Snapshots.Load(),
+					entries:   s.Entries.Load(),
+					dropped:   s.Dropped.Load(),
+					errs:      s.RedisErrors.Load(),
+				}
+				was := last[s]
+				last[s] = now
+				log.Printf("source %s: last %s — %d events, %d snapshots, %d stream entries, %d dropped, %d redis errors; up %s, %d events total",
+					s.Callsign, every,
+					now.received-was.received,
+					now.snapshots-was.snapshots,
+					now.entries-was.entries,
+					now.dropped-was.dropped,
+					now.errs-was.errs,
+					time.Since(started).Truncate(time.Second),
+					now.received)
+			}
+		}
+	}
 }
 
 // relay handles one source's messages. Run calls handle on a single goroutine,
@@ -211,8 +262,10 @@ func (r *relay) writeSnapshot(msg []byte) {
 		return
 	}
 	if r.stats.Snapshots.Add(1) == 1 {
-		log.Printf("source %s: first snapshot written to %s:* (ttl %s), doorbell on %s%s",
-			r.src.Callsign, snap.Base, snap.TTL, snap.Base, store.UpdatesChannel)
+		// The database is part of the address: without it the keys are easy to
+		// look for in db 0 and not find.
+		log.Printf("source %s: first snapshot written to db %d, %s:* (ttl %s), doorbell on %s%s",
+			r.src.Callsign, r.cfg.Redis.DB, snap.Base, snap.TTL, snap.Base, store.UpdatesChannel)
 	}
 }
 

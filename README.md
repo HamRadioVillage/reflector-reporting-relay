@@ -62,6 +62,46 @@ Stream ids are Redis-assigned, which also supplies ordering that urfd's
 whole-second `timestamp` cannot: two events in the same second still read back in
 arrival order.
 
+## What it logs
+
+A handful of lines at startup, then **nothing while it is working**. There is no
+per-event or per-snapshot logging: at a ten-second interval that would be some
+8,600 lines a day saying nothing, which is how a real problem gets buried.
+
+```
+reflector-reporting-relay v0.1.3
+redis 127.0.0.1:6379 db 30, key prefix "urfd"
+source URF478: subscribed to tcp://127.0.0.1:5555 (queue 4096)
+heartbeat urfd:relay every 10s (expires after 30s)
+summary every 1h
+source URF478: first snapshot written to db 30, urfd:URF478:* (ttl 30s), doorbell on urfd:URF478:updates
+```
+
+That last line is the one to look for: it means a `state` event arrived, decoded,
+matched the configured callsign, and committed to Redis. It names the database
+and key prefix, which is the address you need to look anything up — and note that
+`redis-cli` talks to db 0 unless you pass `-n`:
+
+```sh
+redis-cli -n 30 --scan --pattern 'urfd:*'
+redis-cli -n 30 TTL urfd:URF478:reflector     # a number counting down, resetting each interval
+```
+
+Once an interval, one line per source reports the window and the totals:
+
+```
+source URF478: last 1h0m0s — 360 events, 360 snapshots, 12 stream entries, 0 dropped, 0 redis errors; up 26h0m0s, 9360 events total
+```
+
+The window figures come first because *"0 events in the last hour"* is the
+interesting statement, and a monotonic counter can never make it. Set
+`summary_interval: 0` to switch it off.
+
+Everything else in the log is a problem: a Redis write that failed, an event that
+would not decode, a source whose callsign does not match what arrives, a
+reflector too old to carry the `timestamp`/`reflector` envelope, or an unknown
+event type. The last three are logged once rather than every interval.
+
 ## Telling the two failure modes apart
 
 Both a dead reflector and a dead relay end with the snapshot keys expiring, so

@@ -32,6 +32,10 @@ type Defaults struct {
 	// expires after three of these, so its absence means the relay is gone
 	// rather than merely quiet.
 	HeartbeatInterval Duration `yaml:"heartbeat_interval"`
+	// SummaryInterval is how often a one-line total per source is logged. The
+	// relay is otherwise silent once running, which is right for a service but
+	// leaves nothing in the journal to prove it is alive. Zero switches it off.
+	SummaryInterval Duration `yaml:"summary_interval"`
 }
 
 // Source is one reflector to subscribe to.
@@ -46,6 +50,10 @@ type Config struct {
 	Redis    Redis    `yaml:"redis"`
 	Defaults Defaults `yaml:"defaults"`
 	Sources  []Source `yaml:"sources"`
+
+	// summarySet records whether summary_interval appeared in the file, so that
+	// an explicit 0 ("off") is not mistaken for an absent key.
+	summarySet bool
 }
 
 // Load reads path, applies defaults, and validates what cannot be defaulted.
@@ -58,6 +66,7 @@ func Load(path string) (*Config, error) {
 	if err := yaml.Unmarshal(b, &c); err != nil {
 		return nil, fmt.Errorf("parsing %s: %w", path, err)
 	}
+	c.summarySet = summaryIntervalPresent(b)
 	c.applyDefaults()
 	return &c, c.validate()
 }
@@ -80,6 +89,10 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Defaults.HeartbeatInterval.Duration == 0 {
 		c.Defaults.HeartbeatInterval.Duration = 10 * time.Second
+	}
+	// Zero is a deliberate "off", so only an absent key gets the default.
+	if !c.summarySet {
+		c.Defaults.SummaryInterval.Duration = time.Hour
 	}
 }
 
@@ -104,6 +117,9 @@ func (c *Config) validate() error {
 	if c.Defaults.HeartbeatInterval.Duration < time.Second {
 		return fmt.Errorf("defaults.heartbeat_interval is %s: below a second the relay spends more time reporting than relaying", c.Defaults.HeartbeatInterval)
 	}
+	if c.Defaults.SummaryInterval.Duration != 0 && c.Defaults.SummaryInterval.Duration < time.Minute {
+		return fmt.Errorf("defaults.summary_interval is %s: use 0 to switch the summary off, or at least a minute", c.Defaults.SummaryInterval)
+	}
 	if c.Defaults.SnapshotTTLFactor < 2 {
 		return fmt.Errorf("defaults.snapshot_ttl_factor is %d: a factor below 2 expires snapshots between broadcasts", c.Defaults.SnapshotTTLFactor)
 	}
@@ -126,4 +142,18 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 	}
 	d.Duration = parsed
 	return nil
+}
+
+// summaryInterval is the one setting whose zero value means something, so it
+// needs to know whether the file said anything at all.
+func summaryIntervalPresent(body []byte) bool {
+	var probe struct {
+		Defaults struct {
+			SummaryInterval *string `yaml:"summary_interval"`
+		} `yaml:"defaults"`
+	}
+	if err := yaml.Unmarshal(body, &probe); err != nil {
+		return false
+	}
+	return probe.Defaults.SummaryInterval != nil
 }

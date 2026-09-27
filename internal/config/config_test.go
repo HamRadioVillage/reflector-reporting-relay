@@ -59,3 +59,30 @@ func TestLoadRejects(t *testing.T) {
 		})
 	}
 }
+
+func TestSummaryIntervalDefaultsToAnHour(t *testing.T) {
+	c, err := Load(write(t, "sources:\n  - callsign: URF999\n    nng: tcp://127.0.0.1:5555\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Defaults.SummaryInterval.Duration != time.Hour {
+		t.Errorf("summary interval = %v, want 1h", c.Defaults.SummaryInterval)
+	}
+}
+
+// Zero means "off", and must not be mistaken for an absent key and defaulted.
+func TestSummaryIntervalZeroIsOff(t *testing.T) {
+	c, err := Load(write(t, "defaults:\n  summary_interval: 0s\nsources:\n  - callsign: URF999\n    nng: tcp://127.0.0.1:5555\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Defaults.SummaryInterval.Duration != 0 {
+		t.Errorf("summary interval = %v, want 0 (off)", c.Defaults.SummaryInterval)
+	}
+}
+
+func TestSummaryIntervalRejectsSubMinute(t *testing.T) {
+	if _, err := Load(write(t, "defaults:\n  summary_interval: 5s\nsources:\n  - callsign: URF999\n    nng: tcp://127.0.0.1:5555\n")); err == nil {
+		t.Error("Load with summary_interval: 5s: want an error")
+	}
+}

@@ -166,6 +166,12 @@ the snapshot keys expiring. Verified against a live rig:
 
 The streams survive both, so history outlives whichever half failed.
 
+The heartbeat is the machine-readable half of this. The human-readable half is
+one log line per source per `summary_interval` (default an hour, `0` to disable)
+carrying the same counters as deltas over the window — the relay is otherwise
+silent while it works, which is right for a service but leaves an operator with
+nothing between a restart and a fault.
+
 **Doorbell** — `PUBLISH urfd:URF123:updates <epoch-ms>` in the *same*
 `MULTI`/`EXEC` as the snapshot. A subscriber is therefore never woken before the
 keys it will read are visible, and a commit never happens without waking it.
