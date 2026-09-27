@@ -124,9 +124,23 @@ urfd ──NNG PUB──▶ relay ──▶ Redis ──▶ dashboard / exporter
 
 ## Installing it
 
-Release tarballs carry a static binary — no cgo, no libnng, nothing to install
-alongside it — for `linux/amd64`, `linux/arm64` and `linux/arm` (GOARM=7), which
-covers a VPS and a Raspberry Pi. `make dist` builds all three with checksums.
+**The reflector host needs no Go toolchain.** Release tarballs carry a static
+binary — no cgo, no libnng, nothing to install alongside it — for `linux/amd64`,
+`linux/arm64` and `linux/arm` (GOARM=7), which covers a VPS and a Raspberry Pi.
+Build on whatever machine you develop on with `make dist`, which produces all
+three plus checksums, and copy the one you need across:
+
+```sh
+make dist
+scp dist/relay-*-linux-amd64.tar.gz reflector-host:/tmp/
+```
+
+If you would rather build *on* the reflector host, it needs **Go 1.24 or
+newer**. Go 1.19, which is what Debian 12 ships as `golang-go`, fails on
+`go-redis` with `package cmp is not in GOROOT` — `cmp`, `maps` and `slices`
+joined the standard library in Go 1.21, and Go before 1.21 cannot fetch a newer
+toolchain for itself either. `apt install golang-go` is usually not enough;
+take the tarball from <https://go.dev/dl/> or a backports package.
 
 ```sh
 # a system user with no home, no shell and no privileges
